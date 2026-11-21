@@ -124,18 +124,22 @@ func (s *File) extractorFragments(ctx context.Context, extractor archives.Extrac
 		defer innerReader.Close()
 		path := filepath.Clean(d.NameInArchive)
 
-		if s.Config != nil && shouldSkipPath(s.Config, path) {
-			logging.Debug().Str("path", s.FullPath()).Msg("skipping file: global allowlist")
-			return nil
-		}
-
 		file := &File{
 			Content:         innerReader,
 			Path:            path,
 			Symlink:         s.Symlink,
+			Config:          s.Config,
 			outerPaths:      append(s.outerPaths, filepath.ToSlash(s.Path)),
 			MaxArchiveDepth: s.MaxArchiveDepth,
 			archiveDepth:    s.archiveDepth + 1,
+		}
+
+		// Check the full composite path against the allowlists. The
+		// archive-inner relative form is one of the candidates, so entries
+		// can be matched with or without their outer paths.
+		if shouldSkipPath(s.Config, file.FullPath()) {
+			logging.Debug().Str("path", file.FullPath()).Msg("skipping file: global allowlist")
+			return nil
 		}
 
 		if err := file.Fragments(ctx, yield); err != nil {

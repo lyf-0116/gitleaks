@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -293,7 +294,7 @@ func (d *Detector) DetectContext(ctx context.Context, fragment Fragment) []repor
 	// check if filepath is allowed
 	if fragment.FilePath != "" {
 		// is the path our config or baseline file?
-		if fragment.FilePath == d.Config.Path || (d.baselinePath != "" && fragment.FilePath == d.baselinePath) {
+		if d.isConfigOrBaselinePath(fragment.FilePath) {
 			logging.Trace().Msg("skipping file: matches config or baseline path")
 			return findings
 		}
@@ -718,19 +719,11 @@ func (d *Detector) AddFinding(finding report.Finding) {
 
 	// check if we should ignore this finding
 	logger := logging.With().Str("finding", finding.Secret).Logger()
-	if _, ok := d.gitleaksIgnore[globalFingerprint]; ok {
+	if ignored, fingerprint := d.isIgnored(finding); ignored {
 		logger.Debug().
-			Str("fingerprint", globalFingerprint).
-			Msg("skipping finding: global fingerprint")
+			Str("fingerprint", fingerprint).
+			Msg("skipping finding: fingerprint")
 		return
-	} else if finding.Commit != "" {
-		// Awkward nested if because I'm not sure how to chain these two conditions.
-		if _, ok := d.gitleaksIgnore[finding.Fingerprint]; ok {
-			logger.Debug().
-				Str("fingerprint", finding.Fingerprint).
-				Msgf("skipping finding: fingerprint")
-			return
-		}
 	}
 
 	if d.baseline != nil && !IsNew(finding, d.Redact, d.baseline) {
@@ -751,6 +744,46 @@ func (d *Detector) AddFinding(finding report.Finding) {
 // Findings returns the findings added to the detector
 func (d *Detector) Findings() []report.Finding {
 	return d.findings
+}
+
+// isConfigOrBaselinePath reports whether |path| refers to the gitleaks
+// config or baseline file. All normalized forms of the path are considered
+// so that, e.g., a baseline file nested inside an archive is skipped too.
+func (d *Detector) isConfigOrBaselinePath(path string) bool {
+	configPath := filepath.ToSlash(d.Config.Path)
+	baselinePath := filepath.ToSlash(d.baselinePath)
+	for _, candidate := range sources.PathCandidates(path) {
+		if configPath != "" && candidate == configPath {
+			return true
+		}
+		if baselinePath != "" && candidate == baselinePath {
+			return true
+		}
+	}
+	return false
+}
+
+// isIgnored reports whether the finding matches an entry in .gitleaksignore.
+// Fingerprints are checked against all normalized forms of the finding's
+// path so ignore entries match regardless of how the path was written.
+func (d *Detector) isIgnored(finding report.Finding) (bool, string) {
+	candidates := sources.PathCandidates(finding.File)
+	if len(candidates) == 0 {
+		candidates = []string{finding.File}
+	}
+	for _, candidate := range candidates {
+		globalFingerprint := fmt.Sprintf("%s:%s:%d", candidate, finding.RuleID, finding.StartLine)
+		if _, ok := d.gitleaksIgnore[globalFingerprint]; ok {
+			return true, globalFingerprint
+		}
+		if finding.Commit != "" {
+			fingerprint := fmt.Sprintf("%s:%s:%s:%d", finding.Commit, candidate, finding.RuleID, finding.StartLine)
+			if _, ok := d.gitleaksIgnore[fingerprint]; ok {
+				return true, fingerprint
+			}
+		}
+	}
+	return false, ""
 }
 
 // AddCommit synchronously adds a commit to the commit slice
@@ -778,7 +811,7 @@ func checkCommitOrPathAllowed(
 			isAllowed        bool
 			allowlistChecks  []bool
 			commitAllowed, _ = a.CommitAllowed(fragment.CommitSHA)
-			pathAllowed      = a.PathAllowed(fragment.FilePath) || (fragment.WindowsFilePath != "" && a.PathAllowed(fragment.WindowsFilePath))
+			pathAllowed      = sources.PathAllowed(a, fragment.FilePath) || (fragment.WindowsFilePath != "" && sources.PathAllowed(a, fragment.WindowsFilePath))
 		)
 		// If the condition is "AND" we need to check all conditions.
 		if a.MatchCondition == config.AllowlistMatchAnd {

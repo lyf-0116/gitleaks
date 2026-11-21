@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"path/filepath"
 	"runtime"
 
 	"github.com/mholt/archives"
@@ -42,10 +41,11 @@ func shouldSkipPath(cfg *config.Config, path string) bool {
 	}
 
 	for _, a := range cfg.Allowlists {
-		if a.PathAllowed(path) ||
-			// TODO: Remove this in v9.
-			// This is an awkward hack to mitigate https://github.com/gitleaks/gitleaks/issues/1641.
-			(isWindows && a.PathAllowed(filepath.ToSlash(path))) {
+		// PathAllowed checks all normalized forms of the path, which covers
+		// the awkward hack to mitigate
+		// https://github.com/gitleaks/gitleaks/issues/1641.
+		// TODO: Remove the extra forms in v9.
+		if PathAllowed(a, path) {
 			return true
 		}
 	}
