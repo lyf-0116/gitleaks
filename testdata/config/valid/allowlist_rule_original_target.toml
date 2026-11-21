@@ -1,0 +1,17 @@
+title = "allowlist targets the original undecoded text"
+
+[[rules]]
+    id = "example"
+    regex = '''example\d+'''
+    tags = ["example"]
+
+    [[rules.allowlists]]
+        regexTarget = "original"
+        stopwordTarget = "original"
+        regexes = ["source-line"]
+        stopwords = ["placeholder"]
+
+    [[rules.allowlists]]
+        # plural spelling is accepted as an alias
+        stopwordsTarget = "original"
+        stopwords = ["placeholder"]

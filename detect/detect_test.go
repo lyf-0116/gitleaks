@@ -121,7 +121,7 @@ func compare(t *testing.T, a, b []report.Finding) {
 			return a.Secret < b.Secret
 		}),
 		cmpopts.IgnoreFields(report.Finding{},
-			"Fingerprint", "Author", "Email", "Date", "Message", "Commit", "requiredFindings"),
+			"Fingerprint", "Author", "Email", "Date", "Message", "Commit", "DecodedLine", "requiredFindings"),
 		cmpopts.EquateApprox(0.0001, 0), // For floating point Entropy comparison
 	); diff != "" {
 		t.Errorf("findings mismatch (-want +got):\n%s", diff)
@@ -2425,6 +2425,92 @@ let password = 'Summer2024!';`
 
 			actual := d.detectRule(f, raw, rule, []*codec.EncodedSegment{})
 			compare(t, tc.expected, actual)
+		})
+	}
+}
+
+func TestDecodedAllowlistOriginalTarget(t *testing.T) {
+	raw := `password="bFJxQkstejVrZjQtcGxlYXNlLWlnbm9yZS1tZS1YLVhJSk0yUGRkdw=="`
+
+	tests := map[string]struct {
+		allowlist *config.Allowlist
+		wantFound bool
+	}{
+		"decoded line target": {
+			allowlist: &config.Allowlist{
+				RegexTarget: "line",
+				Regexes:     []*regexp.Regexp{regexp.MustCompile("please-ignore-me")},
+			},
+		},
+		"original target matches encoded text": {
+			allowlist: &config.Allowlist{
+				RegexTarget: "original",
+				Regexes:     []*regexp.Regexp{regexp.MustCompile("bFJxQkstejVr")},
+			},
+		},
+		"decoded line does not match encoded text": {
+			allowlist: &config.Allowlist{
+				RegexTarget: "line",
+				Regexes:     []*regexp.Regexp{regexp.MustCompile("bFJxQkstejVr")},
+			},
+			wantFound: true,
+		},
+		"default stopword target is decoded secret": {
+			allowlist: &config.Allowlist{
+				StopWords: []string{"bFJxQkstejVr"},
+			},
+			wantFound: true,
+		},
+		"original stopword target matches encoded text": {
+			allowlist: &config.Allowlist{
+				StopWordTarget: "original",
+				StopWords:      []string{"bFJxQkstejVr"},
+			},
+		},
+		"original regex target also binds stopwords": {
+			allowlist: &config.Allowlist{
+				RegexTarget: "original",
+				Regexes:     []*regexp.Regexp{regexp.MustCompile("bFJxQkstejVr")},
+				StopWords:   []string{"bFJxQkstejVr"},
+			},
+		},
+		"line stopword target matches decoded text": {
+			allowlist: &config.Allowlist{
+				StopWordTarget: "line",
+				StopWords:      []string{"please-ignore-me"},
+			},
+		},
+		"stopwords target alias": {
+			allowlist: &config.Allowlist{
+				StopWordsTarget: "original",
+				StopWords:       []string{"bFJxQkstejVr"},
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, tc.allowlist.Validate())
+
+			d, err := NewDetectorDefaultConfig()
+			require.NoError(t, err)
+
+			fragment := Fragment{Raw: raw, FilePath: "tmp.go"}
+			decoded, segments := codec.NewDecoder().Decode(fragment.Raw, nil)
+			rule := config.Rule{
+				RuleID:      "decoded-password",
+				Regex:       regexp.MustCompile(`password\s*=\s*"([^"]+please-ignore-me[^"]+)"`),
+				SecretGroup: 1,
+				Allowlists:  []*config.Allowlist{tc.allowlist},
+			}
+
+			findings := d.detectRule(fragment, decoded, rule, segments)
+			if tc.wantFound {
+				require.Len(t, findings, 1)
+				assert.Equal(t, "lRqBK-z5kf4-please-ignore-me-X-XIJM2Pddw", findings[0].Secret)
+				return
+			}
+			require.Empty(t, findings)
 		})
 	}
 }

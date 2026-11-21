@@ -262,6 +262,32 @@ func TestTranslateAllowlists(t *testing.T) {
 			},
 		},
 		{
+			cfgName: "valid/allowlist_rule_original_target",
+			cfg: Config{
+				Title: "allowlist targets the original undecoded text",
+				Rules: map[string]Rule{"example": {
+					RuleID:   "example",
+					Regex:    regexp.MustCompile(`example\d+`),
+					Keywords: []string{},
+					Tags:     []string{"example"},
+					Allowlists: []*Allowlist{
+						{
+							MatchCondition: AllowlistMatchOr,
+							RegexTarget:    "original",
+							StopWordTarget: "original",
+							Regexes:        []*regexp.Regexp{regexp.MustCompile("source-line")},
+							StopWords:      []string{"placeholder"},
+						},
+						{
+							MatchCondition: AllowlistMatchOr,
+							StopWordTarget: "original",
+							StopWords:      []string{"placeholder"},
+						},
+					},
+				}},
+			},
+		},
+		{
 			cfgName: "valid/allowlist_rule_commit",
 			cfg: Config{
 				Title: "simple config with allowlist for a specific commit",
@@ -313,6 +339,11 @@ func TestTranslateAllowlists(t *testing.T) {
 			cfgName:   "invalid/allowlist_rule_regextarget",
 			cfg:       Config{},
 			wantError: errors.New("example: [[rules.allowlists]] unknown allowlist |regexTarget| 'mtach' (expected 'match', 'line')"),
+		},
+		{
+			cfgName:   "invalid/allowlist_rule_stopwordtarget",
+			cfg:       Config{},
+			wantError: errors.New("example: [[rules.allowlists]] unknown allowlist |stopwordTarget| 'mtach' (expected 'secret', 'match', 'line', 'original')"),
 		},
 	}
 

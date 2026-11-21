@@ -1,0 +1,7 @@
+[[rules]]
+    id = "example"
+    regex = '''example\d+'''
+
+    [[rules.allowlists]]
+        stopwordTarget = "mtach"
+        stopwords = ["placeholder"]

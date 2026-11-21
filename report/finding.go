@@ -23,6 +23,10 @@ type Finding struct {
 
 	Line string `json:"-"`
 
+	// DecodedLine is the line containing the decoded match. It is empty for
+	// findings that were not found in decoded text.
+	DecodedLine string `json:"-"`
+
 	Match string
 
 	// Captured secret
@@ -81,6 +85,7 @@ func (f *Finding) Redact(percent uint) {
 		secret = "REDACTED"
 	}
 	f.Line = strings.ReplaceAll(f.Line, f.Secret, secret)
+	f.DecodedLine = strings.ReplaceAll(f.DecodedLine, f.Secret, secret)
 	f.Match = strings.ReplaceAll(f.Match, f.Secret, secret)
 	f.Secret = secret
 }

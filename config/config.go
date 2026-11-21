@@ -75,7 +75,11 @@ type viperRuleAllowlist struct {
 	Paths       []string
 	RegexTarget string
 	Regexes     []string
-	StopWords   []string
+	// StopWordTarget determines which text StopWords are tested against.
+	// StopWordsTarget is accepted as an alias.
+	StopWordTarget  string `mapstructure:"stopwordTarget"`
+	StopWordsTarget string `mapstructure:"stopwordsTarget"`
+	StopWords       []string
 }
 
 type viperGlobalAllowlist struct {
@@ -332,10 +336,25 @@ func (vc *ViperConfig) parseAllowlist(a *viperRuleAllowlist) (*Allowlist, error)
 		switch regexTarget {
 		case "secret":
 			regexTarget = ""
-		case "match", "line":
+		case "match", "line", "original":
 			// do nothing
 		default:
 			return nil, fmt.Errorf("unknown allowlist |regexTarget| '%s' (expected 'match', 'line')", regexTarget)
+		}
+	}
+
+	stopWordTarget := a.StopWordTarget
+	if stopWordTarget == "" {
+		stopWordTarget = a.StopWordsTarget
+	}
+	if stopWordTarget != "" {
+		switch stopWordTarget {
+		case "secret":
+			stopWordTarget = ""
+		case "match", "line", "original":
+			// do nothing
+		default:
+			return nil, fmt.Errorf("unknown allowlist |stopwordTarget| '%s' (expected 'secret', 'match', 'line', 'original')", stopWordTarget)
 		}
 	}
 	var allowlistRegexes []*regexp.Regexp
@@ -353,6 +372,7 @@ func (vc *ViperConfig) parseAllowlist(a *viperRuleAllowlist) (*Allowlist, error)
 		Commits:        a.Commits,
 		Paths:          allowlistPaths,
 		RegexTarget:    regexTarget,
+		StopWordTarget: stopWordTarget,
 		Regexes:        allowlistRegexes,
 		StopWords:      a.StopWords,
 	}

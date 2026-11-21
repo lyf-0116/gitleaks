@@ -328,6 +328,9 @@ tags = ["tag","another tag"]
     ]
     # note: stopwords targets the extracted secret, not the entire regex match
     # like 'regexes' does. (stopwords introduced in 8.8.0)
+    # Set |stopwordTarget| to "original" to test stopwords against the
+    # original, undecoded line instead. It defaults to the decoded secret,
+    # unless |regexTarget| is "original", in which case it follows that target.
     stopwords = [
       '''client''',
       '''endpoint''',
@@ -338,7 +341,8 @@ tags = ["tag","another tag"]
     # e.g., this matches if |regexes| AND |paths| are satisfied.
     condition = "AND"
     # note: |regexes| defaults to check the _Secret_ in the finding.
-    # Acceptable values for |regexTarget| are "secret" (default), "match", and "line".
+    # Acceptable values for |regexTarget| are "secret" (default), "match", "line",
+    # and "original" (the original, undecoded line).
     regexTarget = "match"
     regexes = [ '''(?i)parseur[il]''' ]
     paths = [ '''package-lock\.json''' ]
@@ -367,7 +371,8 @@ paths = [
   '''(.*?)(jpg|gif|doc)'''
 ]
 # note: (global) regexTarget defaults to check the _Secret_ in the finding.
-# Acceptable values for regexTarget are "match" and "line"
+# Acceptable values for regexTarget are "secret", "match", "line", and
+# "original" (the original, undecoded line).
 regexTarget = "match"
 regexes = [
   '''219-09-9999''',
@@ -376,6 +381,10 @@ regexes = [
 ]
 # note: stopwords targets the extracted secret, not the entire regex match
 # like 'regexes' does. (stopwords introduced in 8.8.0)
+# To test stopwords against the original, undecoded line instead, set
+# |stopwordTarget| to "original". It defaults to the decoded secret, unless
+# |regexTarget| is "original", in which case it follows that target.
+# stopwordTarget = "original"
 stopwords = [
   '''client''',
   '''endpoint''',

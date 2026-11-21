@@ -39,11 +39,18 @@ type Allowlist struct {
 	// Paths is a slice of path regular expressions that are allowed to be ignored.
 	Paths []*regexp.Regexp
 
-	// Can be `match` or `line`.
+	// Can be `secret`, `match`, `line`, or `original`.
+	//
+	// If `secret` (or empty), the _Regexes_ will be tested against the found secret.
 	//
 	// If `match` the _Regexes_ will be tested against the match of the _Rule.Regex_.
 	//
 	// If `line` the _Regexes_ will be tested against the entire line.
+	//
+	// If `original` the _Regexes_ will be tested against the original, undecoded
+	// line. This is useful when the secret is only present after decoding and
+	// the allowlist needs to target source text (such as a variable name or
+	// comment) that only exists in the original text.
 	//
 	// If RegexTarget is empty, it will be tested against the found secret.
 	RegexTarget string
@@ -51,9 +58,18 @@ type Allowlist struct {
 	// Regexes is slice of content regular expressions that are allowed to be ignored.
 	Regexes []*regexp.Regexp
 
+	// StopWordTarget determines which text the _StopWords_ are tested against.
+	//
+	// Can be `secret`, `match`, `line`, or `original`. If empty, it defaults to
+	// `secret` to preserve the historical behavior.
+	StopWordTarget string
+
+	// StopWordsTarget is an alias for StopWordTarget.
+	StopWordsTarget string
+
 	// StopWords is a slice of stop words that are allowed to be ignored.
-	// This targets the _secret_, not the content of the regex match like the
-	// Regexes slice.
+	// By default this targets the _secret_, not the content of the regex match
+	// like the Regexes slice. Set StopWordTarget to change the target.
 	StopWords []string
 
 	// validated is an internal flag to track whether `Validate()` has been called.
@@ -176,4 +192,25 @@ func (a *Allowlist) ContainsStopWord(s string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// EffectiveStopWordTarget returns the configured target for stop words,
+// accepting StopWordsTarget as an alias. An empty target preserves the
+// historical behavior of testing stop words against the extracted secret.
+// When the allowlist targets the original text, stop words follow that target
+// unless explicitly configured otherwise.
+func (a *Allowlist) EffectiveStopWordTarget() string {
+	if a == nil {
+		return ""
+	}
+	if a.StopWordTarget != "" {
+		return a.StopWordTarget
+	}
+	if a.StopWordsTarget != "" {
+		return a.StopWordsTarget
+	}
+	if a.RegexTarget == "original" {
+		return "original"
+	}
+	return ""
 }

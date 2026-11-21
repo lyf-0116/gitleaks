@@ -514,6 +514,7 @@ func (d *Detector) detectRule(fragment Fragment, currentRaw string, r config.Rul
 			continue
 		}
 
+		finding.DecodedLine = currentLine
 		if currentLine == "" {
 			currentLine = finding.Line
 		}
@@ -828,13 +829,8 @@ func checkFindingAllowed(
 	allowlists []*config.Allowlist,
 ) (bool, *zerolog.Event) {
 	for _, a := range allowlists {
-		allowlistTarget := finding.Secret
-		switch a.RegexTarget {
-		case "match":
-			allowlistTarget = finding.Match
-		case "line":
-			allowlistTarget = currentLine
-		}
+		allowlistTarget := allowlistText(finding, currentLine, a.RegexTarget)
+		stopWordTarget := allowlistText(finding, currentLine, a.EffectiveStopWordTarget())
 
 		var (
 			checks                 []bool
@@ -843,7 +839,7 @@ func checkFindingAllowed(
 			commit                 string
 			pathAllowed            bool
 			regexAllowed           = a.RegexAllowed(allowlistTarget)
-			containsStopword, word = a.ContainsStopWord(finding.Secret)
+			containsStopword, word = a.ContainsStopWord(stopWordTarget)
 		)
 		// If the condition is "AND" we need to check all conditions.
 		if a.MatchCondition == config.AllowlistMatchAnd {
@@ -888,6 +884,26 @@ func checkFindingAllowed(
 		}
 	}
 	return false, nil
+}
+
+// allowlistText returns the text that an allowlist target refers to.
+func allowlistText(finding report.Finding, currentLine, target string) string {
+	switch target {
+	case "match":
+		return finding.Match
+	case "line":
+		if currentLine != "" {
+			return currentLine
+		}
+		if finding.DecodedLine != "" {
+			return finding.DecodedLine
+		}
+		return finding.Line
+	case "original":
+		return finding.Line
+	default:
+		return finding.Secret
+	}
 }
 
 func allTrue(bools []bool) bool {
