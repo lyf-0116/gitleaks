@@ -87,6 +87,11 @@ type Detector struct {
 	// matching given a set of words (keywords from the rules in the config)
 	prefilter ahocorasick.Trie
 
+	// ruleKeywords contains the effective prefilter keywords for each rule.
+	// Some rules have keywords that their regex can never produce, so those
+	// keywords must not be used to filter the rule out.
+	ruleKeywords map[string][]string
+
 	// a list of known findings that should be ignored
 	baseline []report.Finding
 
@@ -119,6 +124,19 @@ func NewDetector(cfg config.Config) *Detector {
 // NewDetectorContext is the same as NewDetector but supports passing in a
 // context to use for timeouts
 func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
+	keywords := maps.Clone(cfg.Keywords)
+	if keywords == nil {
+		keywords = make(map[string]struct{}, len(cfg.Keywords))
+	}
+	ruleKeywords := make(map[string][]string, len(cfg.Rules))
+	for id, rule := range cfg.Rules {
+		effective := effectiveRuleKeywords(rule)
+		ruleKeywords[id] = effective
+		for _, keyword := range effective {
+			keywords[keyword] = struct{}{}
+		}
+	}
+
 	return &Detector{
 		commitMap:      make(map[string]bool),
 		gitleaksIgnore: make(map[string]struct{}),
@@ -126,7 +144,8 @@ func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 		commitMutex:    &sync.Mutex{},
 		findings:       make([]report.Finding, 0),
 		Config:         cfg,
-		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
+		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(keywords)).Build(),
+		ruleKeywords:   ruleKeywords,
 		Sema:           semgroup.NewGroup(ctx, 40),
 	}
 }
@@ -329,7 +348,8 @@ ScanLoop:
 				case <-ctx.Done():
 					break ScanLoop
 				default:
-					if len(rule.Keywords) == 0 {
+					ruleKeywords := d.ruleKeywords[rule.RuleID]
+					if len(ruleKeywords) == 0 {
 						// if no keywords are associated with the rule always scan the
 						// fragment using the rule
 						findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
@@ -337,7 +357,7 @@ ScanLoop:
 					}
 
 					// check if keywords are in the fragment
-					for _, k := range rule.Keywords {
+					for _, k := range ruleKeywords {
 						if _, ok := keywords[strings.ToLower(k)]; ok {
 							findings = append(findings, d.detectRule(fragment, currentRaw, rule, encodedSegments)...)
 							break
