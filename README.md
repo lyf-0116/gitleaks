@@ -131,6 +131,7 @@ Available Commands:
   version     display gitleaks version
 
 Flags:
+      --allow-legacy-fingerprints     temporarily allow location-only .gitleaksignore entries without a content digest
   -b, --baseline-path string          path to baseline with issues that can be ignored
   -c, --config string                 config file path
                                       order of precedence:
@@ -157,6 +158,7 @@ Flags:
   -r, --report-path string            report file
       --report-template string        template file used to generate the report (implies --report-format=template)
       --timeout int                   set a timeout for gitleaks commands in seconds (default "0", no timeout is set)
+      --use-fingerprint-v2            use content-specific fingerprints for ignores and redacted baselines (default true)
   -v, --verbose                       show verbose output from scan
       --version                       version for gitleaks
 
@@ -496,7 +498,23 @@ class CustomClass:
 
 #### .gitleaksignore
 
-You can ignore specific findings by creating a `.gitleaksignore` file at the root of your repo. In release v8.10.0 Gitleaks added a `Fingerprint` value to the Gitleaks report. Each leak, or finding, has a Fingerprint that uniquely identifies a secret. Add this fingerprint to the `.gitleaksignore` file to ignore that specific secret. See Gitleaks' [.gitleaksignore](https://github.com/gitleaks/gitleaks/blob/master/.gitleaksignore) for an example. Note: this feature is experimental and is subject to change in the future.
+You can ignore specific findings by creating a `.gitleaksignore` file at the root of your repo. Gitleaks reports both the legacy coordinate `Fingerprint` (`commit?:file:rule:line`) and a content-specific `FingerprintV2` (`v2:<sha256>`). Add the `FingerprintV2` token to `.gitleaksignore` to suppress that secret for the same file and rule even when code is inserted above it.
+
+The V2 token does not include the line number because line numbers are auxiliary coordinates and drift when files change. It binds the file path, rule ID, captured secret, and matched line content with length-prefixed hashing. The line content distinguishes nearby occurrences while remaining stable when unrelated code is inserted above the finding. Replacing the secret on the same line produces a different token and is reported.
+
+```
+v2:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Coordinate entries without a content digest (for example `config.py:aws-access-token:1`) are treated as pending rebuild entries by default: Gitleaks warns about them but does not let them suppress findings. Regenerate the entries from a V2 scan and review the findings before replacing the old records. During migration, `--allow-legacy-fingerprints` temporarily restores the old location-only behavior. Set `--use-fingerprint-v2=false` to restore the legacy location-only ignore matcher.
+
+You can also append a V2 token to a coordinate record for readability:
+
+```
+config.py:aws-access-token:1:v2:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Only the `v2:` token is used for matching; the coordinate remains a hint. See Gitleaks' [.gitleaksignore](https://github.com/gitleaks/gitleaks/blob/master/.gitleaksignore) for examples. Note: this feature is experimental and is subject to change in the future.
 
 #### Decoding
 

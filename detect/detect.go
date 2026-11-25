@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 
 const (
 	gitleaksAllowSignature = "gitleaks:allow"
+	gitleaksIgnoreV2Prefix = report.FingerprintV2Prefix
 	// SlowWarningThreshold is the amount of time to wait before logging that a file is slow.
 	// This is useful for identifying problematic files and tuning the allowlist.
 	SlowWarningThreshold = 5 * time.Second
@@ -44,6 +46,16 @@ type Detector struct {
 	// so users using gitleaks as a library can set this flag
 	// without calling `detector.Start(cmd *cobra.Command)`
 	Redact uint
+
+	// UseFingerprintV2 enables content-specific fingerprints. In this mode,
+	// legacy location-only .gitleaksignore entries are retained as pending
+	// migrations but no longer suppress findings.
+	UseFingerprintV2 bool
+
+	// AllowLegacyFingerprints temporarily restores the old location-only
+	// ignore behavior. It is intended as a migration escape hatch and should
+	// not be used once ignore entries have been rebuilt with V2 fingerprints.
+	AllowLegacyFingerprints bool
 
 	// verbose is a flag to print findings
 	Verbose bool
@@ -96,6 +108,19 @@ type Detector struct {
 	// gitleaksIgnore
 	gitleaksIgnore map[string]struct{}
 
+	// legacyGitleaksIgnore contains normalized location-only entries loaded
+	// from older .gitleaksignore files.
+	legacyGitleaksIgnore map[string]struct{}
+
+	// pendingGitleaksIgnore contains legacy entries that need a V2 rebuild.
+	pendingGitleaksIgnore map[string]struct{}
+
+	legacyIgnoreWarningLogged bool
+
+	// strictIdentityByDefault is set by constructors. Zero-value Detectors keep
+	// the historical matcher for source compatibility.
+	strictIdentityByDefault bool
+
 	// Sema (https://github.com/fatih/semgroup) controls the concurrency
 	Sema *semgroup.Group
 
@@ -120,14 +145,17 @@ func NewDetector(cfg config.Config) *Detector {
 // context to use for timeouts
 func NewDetectorContext(ctx context.Context, cfg config.Config) *Detector {
 	return &Detector{
-		commitMap:      make(map[string]bool),
-		gitleaksIgnore: make(map[string]struct{}),
-		findingMutex:   &sync.Mutex{},
-		commitMutex:    &sync.Mutex{},
-		findings:       make([]report.Finding, 0),
-		Config:         cfg,
-		prefilter:      *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
-		Sema:           semgroup.NewGroup(ctx, 40),
+		commitMap:               make(map[string]bool),
+		gitleaksIgnore:          make(map[string]struct{}),
+		legacyGitleaksIgnore:    make(map[string]struct{}),
+		pendingGitleaksIgnore:   make(map[string]struct{}),
+		findingMutex:            &sync.Mutex{},
+		commitMutex:             &sync.Mutex{},
+		findings:                make([]report.Finding, 0),
+		Config:                  cfg,
+		strictIdentityByDefault: true,
+		prefilter:               *ahocorasick.NewTrieBuilder().AddStrings(maps.Keys(cfg.Keywords)).Build(),
+		Sema:                    semgroup.NewGroup(ctx, 40),
 	}
 }
 
@@ -152,6 +180,16 @@ func NewDetectorDefaultConfig() (*Detector, error) {
 
 func (d *Detector) AddGitleaksIgnore(gitleaksIgnorePath string) error {
 	logging.Debug().Str("path", gitleaksIgnorePath).Msgf("found .gitleaksignore file")
+	if d.gitleaksIgnore == nil {
+		d.gitleaksIgnore = make(map[string]struct{})
+	}
+	if d.legacyGitleaksIgnore == nil {
+		d.legacyGitleaksIgnore = make(map[string]struct{})
+	}
+	if d.pendingGitleaksIgnore == nil {
+		d.pendingGitleaksIgnore = make(map[string]struct{})
+	}
+
 	file, err := os.Open(gitleaksIgnorePath)
 	if err != nil {
 		return err
@@ -171,6 +209,22 @@ func (d *Detector) AddGitleaksIgnore(gitleaksIgnorePath string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if strings.HasPrefix(line, gitleaksIgnoreV2Prefix) {
+			if !isValidFingerprintV2(line) {
+				logging.Warn().Str("fingerprint", line).Msg("Invalid .gitleaksignore entry")
+				continue
+			}
+			d.gitleaksIgnore[line] = struct{}{}
+			continue
+		}
+		if key, ok := parseV2IgnoreEntry(line); ok {
+			d.gitleaksIgnore[key] = struct{}{}
+			continue
+		}
+		if strings.HasPrefix(line, contentFingerprintPrefix) {
+			d.gitleaksIgnore[line] = struct{}{}
+			continue
+		}
 
 		// Normalize the path.
 		// TODO: Make this a breaking change in v9.
@@ -187,9 +241,65 @@ func (d *Detector) AddGitleaksIgnore(gitleaksIgnorePath string) error {
 		default:
 			logging.Warn().Str("fingerprint", line).Msg("Invalid .gitleaksignore entry")
 		}
-		d.gitleaksIgnore[strings.Join(s, ":")] = struct{}{}
+		fingerprint := strings.Join(s, ":")
+		d.gitleaksIgnore[fingerprint] = struct{}{}
+		d.legacyGitleaksIgnore[fingerprint] = struct{}{}
+		d.pendingGitleaksIgnore[fingerprint] = struct{}{}
+	}
+	if len(d.pendingGitleaksIgnore) > 0 && !d.legacyIgnoreWarningLogged {
+		d.legacyIgnoreWarningLogged = true
+		logging.Warn().
+			Int("count", len(d.pendingGitleaksIgnore)).
+			Msg("legacy .gitleaksignore entries have no content digest and are pending rebuild; run a V2 scan and replace them before relying on suppressed findings")
 	}
 	return nil
+}
+
+// parseV2IgnoreEntry accepts a standalone V2 token or a coordinate record with
+// a V2 token as its final two colon-separated fields. Coordinates are auxiliary
+// metadata. A four-part prefix is treated as a commit-scoped record and the
+// returned key preserves that scope.
+func parseV2IgnoreEntry(line string) (string, bool) {
+	if isValidFingerprintV2(line) {
+		return line, true
+	}
+
+	marker := ":" + gitleaksIgnoreV2Prefix
+	index := strings.LastIndex(line, marker)
+	if index == -1 {
+		return "", false
+	}
+	token := line[index+1:]
+	if !isValidFingerprintV2(token) {
+		return "", false
+	}
+
+	coordinateParts := strings.Split(line[:index], ":")
+	switch len(coordinateParts) {
+	case 3:
+		return token, true
+	case 4:
+		return coordinateParts[0] + ":" + token, true
+	default:
+		return "", false
+	}
+}
+
+// PendingGitleaksIgnoreEntries returns normalized legacy ignore entries that
+// need to be regenerated with content-specific V2 fingerprints.
+func (d *Detector) PendingGitleaksIgnoreEntries() []string {
+	entries := make([]string, 0, len(d.pendingGitleaksIgnore))
+	for entry := range d.pendingGitleaksIgnore {
+		entries = append(entries, entry)
+	}
+	sort.Strings(entries)
+	return entries
+}
+
+// LegacyGitleaksIgnoreEntries returns normalized location-only entries loaded
+// from an older .gitleaksignore file.
+func (d *Detector) LegacyGitleaksIgnoreEntries() []string {
+	return d.PendingGitleaksIgnoreEntries()
 }
 
 // DetectBytes scans the given bytes and returns a list of findings
@@ -246,7 +356,7 @@ func (d *Detector) DetectSource(ctx context.Context, source sources.Source) ([]r
 			})
 		}
 
-		for _, finding := range d.DetectContext(ctx, Fragment(fragment)) {
+		for _, finding := range d.detectFindingsForAdd(ctx, Fragment(fragment)) {
 			d.AddFinding(finding)
 		}
 
@@ -274,6 +384,16 @@ func (d *Detector) Detect(fragment Fragment) []report.Finding {
 // DetectContext is the same as Detect but supports passing in a
 // context to use for timeouts
 func (d *Detector) DetectContext(ctx context.Context, fragment Fragment) []report.Finding {
+	return filter(d.detectContext(ctx, fragment), d.Redact)
+}
+
+// detectFindingsForAdd applies deduplication without redaction so AddFinding can
+// compute content identities and compare baselines using the raw secret.
+func (d *Detector) detectFindingsForAdd(ctx context.Context, fragment Fragment) []report.Finding {
+	return filter(d.detectContext(ctx, fragment), 0)
+}
+
+func (d *Detector) detectContext(ctx context.Context, fragment Fragment) []report.Finding {
 	if fragment.Bytes == nil {
 		d.TotalBytes.Add(uint64(len(fragment.Raw)))
 	}
@@ -364,7 +484,15 @@ ScanLoop:
 		}
 	}
 
-	return filter(findings, d.Redact)
+	if d.UseFingerprintV2 {
+		for i := range findings {
+			if !report.IsValidFingerprintV2(findings[i].FingerprintV2) {
+				findings[i].FingerprintV2 = findings[i].NewFingerprintV2()
+			}
+		}
+	}
+
+	return findings
 }
 
 // detectRule scans the given fragment for the given rule and returns a list of findings
@@ -716,20 +844,60 @@ func (d *Detector) AddFinding(finding report.Finding) {
 		finding.Fingerprint = globalFingerprint
 	}
 
+	fingerprintV2 := finding.FingerprintV2
+	if !report.IsValidFingerprintV2(fingerprintV2) {
+		fingerprintV2 = finding.NewFingerprintV2()
+	}
+	// Keep the raw identity available to baseline comparison. It is removed
+	// again below when V2 output was not requested and no redaction needs it.
+	finding.FingerprintV2 = fingerprintV2
+
 	// check if we should ignore this finding
 	logger := logging.With().Str("finding", finding.Secret).Logger()
-	if _, ok := d.gitleaksIgnore[globalFingerprint]; ok {
+	if _, ok := d.gitleaksIgnore[fingerprintV2]; ok {
 		logger.Debug().
-			Str("fingerprint", globalFingerprint).
-			Msg("skipping finding: global fingerprint")
+			Str("fingerprint", fingerprintV2).
+			Msg("skipping finding: content fingerprint")
 		return
-	} else if finding.Commit != "" {
-		// Awkward nested if because I'm not sure how to chain these two conditions.
-		if _, ok := d.gitleaksIgnore[finding.Fingerprint]; ok {
+	}
+	if finding.Commit != "" {
+		commitFingerprintV2 := finding.Commit + ":" + fingerprintV2
+		if _, ok := d.gitleaksIgnore[commitFingerprintV2]; ok {
 			logger.Debug().
-				Str("fingerprint", finding.Fingerprint).
-				Msgf("skipping finding: fingerprint")
+				Str("fingerprint", commitFingerprintV2).
+				Msg("skipping finding: commit-scoped content fingerprint")
 			return
+		}
+	}
+
+	ruleContentFingerprint := contentFingerprint(finding.RuleID, finding.Secret)
+	if _, ok := d.gitleaksIgnore[ruleContentFingerprint]; ok {
+		logger.Debug().
+			Str("fingerprint", ruleContentFingerprint).
+			Msg("skipping finding: rule-only content fingerprint")
+		return
+	}
+
+	allowLegacyFingerprint := d.AllowLegacyFingerprints ||
+		(!d.UseFingerprintV2 && !d.strictIdentityByDefault)
+	if allowLegacyFingerprint {
+		_, ignoredInActive := d.gitleaksIgnore[globalFingerprint]
+		_, ignoredAsLegacy := d.legacyGitleaksIgnore[globalFingerprint]
+		if ignoredInActive || ignoredAsLegacy {
+			logger.Debug().
+				Str("fingerprint", globalFingerprint).
+				Msg("skipping finding: global fingerprint")
+			return
+		} else if finding.Commit != "" {
+			// Awkward nested if because I'm not sure how to chain these two conditions.
+			_, ignoredInActive = d.gitleaksIgnore[finding.Fingerprint]
+			_, ignoredAsLegacy = d.legacyGitleaksIgnore[finding.Fingerprint]
+			if ignoredInActive || ignoredAsLegacy {
+				logger.Debug().
+					Str("fingerprint", finding.Fingerprint).
+					Msgf("skipping finding: fingerprint")
+				return
+			}
 		}
 	}
 
@@ -740,12 +908,25 @@ func (d *Detector) AddFinding(finding report.Finding) {
 		return
 	}
 
+	if d.Redact > 0 {
+		finding.Redact(d.Redact)
+	} else if !d.UseFingerprintV2 {
+		finding.FingerprintV2 = ""
+	}
+
+	if d.findingMutex == nil {
+		d.findingMutex = &sync.Mutex{}
+	}
 	d.findingMutex.Lock()
 	d.findings = append(d.findings, finding)
 	if d.Verbose {
 		printFinding(finding, d.NoColor)
 	}
 	d.findingMutex.Unlock()
+}
+
+func isValidFingerprintV2(fingerprint string) bool {
+	return report.IsValidFingerprintV2(fingerprint)
 }
 
 // Findings returns the findings added to the detector

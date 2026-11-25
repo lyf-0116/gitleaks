@@ -1,3 +1,3 @@
-api/ignoreGlobal.go:aws-access-key:20
+api/ignoreGlobal.go:aws-access-key:20:v2:9702d8b21c63c5d72cde14a53766e9dc7a2099171eed563c7a495ec05deb9593
 # test comment
-53cd7a3c6eb4937f413e3c25e4a9f39289afa69e:api/ignoreCommit.go:aws-access-key:20
+53cd7a3c6eb4937f413e3c25e4a9f39289afa69e:api/ignoreCommit.go:aws-access-key:20:v2:7b36a537ff0c6ef55c8aeb6a9ed52bd8d2c1dee73a938d0962fb77eec8da0bf8

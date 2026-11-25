@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/zricethezav/gitleaks/v8/report"
 )
@@ -13,13 +14,20 @@ func IsNew(finding report.Finding, redact uint, baseline []report.Finding) bool 
 	// Explicitly testing each property as it gives significantly better performance in comparison to cmp.Equal(). Drawback is that
 	// the code requires maintenance if/when the Finding struct changes
 	for _, b := range baseline {
+		if sameContentIdentity(finding, b, redact) &&
+			finding.RuleID == b.RuleID &&
+			finding.File == b.File &&
+			finding.Commit == b.Commit {
+			return false
+		}
+
 		if finding.RuleID == b.RuleID &&
 			finding.Description == b.Description &&
 			finding.StartLine == b.StartLine &&
 			finding.EndLine == b.EndLine &&
 			finding.StartColumn == b.StartColumn &&
 			finding.EndColumn == b.EndColumn &&
-			(redact > 0 || (finding.Match == b.Match && finding.Secret == b.Secret)) &&
+			sameFindingContent(finding, b, redact) &&
 			finding.File == b.File &&
 			finding.Commit == b.Commit &&
 			finding.Author == b.Author &&
@@ -32,6 +40,49 @@ func IsNew(finding report.Finding, redact uint, baseline []report.Finding) bool 
 		}
 	}
 	return true
+}
+
+func sameContentIdentity(finding, baseline report.Finding, redact uint) bool {
+	findingIdentity := finding.FingerprintV2
+	if !report.IsValidFingerprintV2(findingIdentity) {
+		// Direct callers may still pass an unredacted finding without a
+		// precomputed token. Redacted values cannot recover the original
+		// identity, so leave the decision to the legacy field comparison.
+		if redact > 0 && isRedactedSecret(finding.Secret) {
+			return false
+		}
+		findingIdentity = finding.NewFingerprintV2()
+	}
+
+	baselineIdentity := baseline.FingerprintV2
+	if !report.IsValidFingerprintV2(baselineIdentity) {
+		if isRedactedSecret(baseline.Secret) || baseline.Secret == "" {
+			return false
+		}
+		baselineIdentity = baseline.NewFingerprintV2()
+	}
+
+	return findingIdentity == baselineIdentity
+}
+
+func sameFindingContent(finding, baseline report.Finding, redact uint) bool {
+	if redact == 0 {
+		return finding.Match == baseline.Match && finding.Secret == baseline.Secret
+	}
+
+	// Preserve the historical positional fallback for direct callers that pass
+	// a redacted finding without a content identity. The detector itself always
+	// populates FingerprintV2 before redaction, so CLI scans use the stronger
+	// comparison below.
+	if !report.IsValidFingerprintV2(finding.FingerprintV2) && isRedactedSecret(finding.Secret) {
+		return true
+	}
+
+	return sameContentIdentity(finding, baseline, redact)
+}
+
+func isRedactedSecret(secret string) bool {
+	return secret == "REDACTED" || strings.HasSuffix(secret, "...")
 }
 
 func LoadBaseline(baselinePath string) ([]report.Finding, error) {

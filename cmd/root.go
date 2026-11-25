@@ -85,6 +85,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolP("ignore-gitleaks-allow", "", false, "ignore gitleaks:allow comments")
 	rootCmd.PersistentFlags().Uint("redact", 0, "redact secrets from logs and stdout. To redact only parts of the secret just apply a percent value from 0..100. For example --redact=20 (default 100%)")
 	rootCmd.Flag("redact").NoOptDefVal = "100"
+	rootCmd.PersistentFlags().Bool("use-fingerprint-v2", true, "use content-specific fingerprints for .gitleaksignore and redacted baselines")
+	rootCmd.PersistentFlags().Bool("allow-legacy-fingerprints", false, "temporarily allow location-only .gitleaksignore entries that have no content digest")
 	rootCmd.PersistentFlags().Bool("no-banner", false, "suppress banner")
 	rootCmd.PersistentFlags().StringSlice("enable-rule", []string{}, "only enable specific rules by id")
 	rootCmd.PersistentFlags().StringP("gitleaks-ignore-path", "i", ".", "path to .gitleaksignore file or folder containing one")
@@ -288,6 +290,15 @@ func Detector(cmd *cobra.Command, cfg config.Config, source string) *detect.Dete
 	// set redact flag
 	if detector.Redact, err = cmd.Flags().GetUint("redact"); err != nil {
 		logging.Fatal().Err(err).Send()
+	}
+	if detector.UseFingerprintV2, err = cmd.Flags().GetBool("use-fingerprint-v2"); err != nil {
+		logging.Fatal().Err(err).Send()
+	}
+	if detector.AllowLegacyFingerprints, err = cmd.Flags().GetBool("allow-legacy-fingerprints"); err != nil {
+		logging.Fatal().Err(err).Send()
+	}
+	if cmd.Flags().Changed("use-fingerprint-v2") && !detector.UseFingerprintV2 {
+		detector.AllowLegacyFingerprints = true
 	}
 	if detector.MaxTargetMegaBytes, err = cmd.Flags().GetInt("max-target-megabytes"); err != nil {
 		logging.Fatal().Err(err).Send()

@@ -79,7 +79,7 @@ func (d *Detector) DetectFiles(scanTargets <-chan sources.ScanTarget) ([]report.
 					return nil
 				}
 
-				for _, finding := range d.Detect(Fragment(fragment)) {
+				for _, finding := range d.detectFindingsForAdd(context.Background(), Fragment(fragment)) {
 					d.AddFinding(finding)
 				}
 				return nil

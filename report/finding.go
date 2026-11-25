@@ -1,8 +1,13 @@
 package report
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -46,12 +51,77 @@ type Finding struct {
 	// unique identifier
 	Fingerprint string
 
+	// FingerprintV2 is a content-specific identity token. Unlike Fingerprint,
+	// it does not depend on the line number, so inserting code above a finding
+	// does not invalidate an ignore entry.
+	FingerprintV2 string `json:"FingerprintV2,omitempty"`
+
+	// ContentFingerprint is an optional rule-plus-secret identity independent
+	// of file, commit, and line coordinates.
+	ContentFingerprint string `json:"ContentFingerprint,omitempty"`
+
 	// Fragment used for multi-part rule checking, CEL filtering,
 	// and eventually ML validation
 	Fragment *sources.Fragment `json:",omitempty"`
 
 	// TODO keeping private for now to during experimental phase
 	requiredFindings []*RequiredFinding
+}
+
+// FingerprintV2Prefix marks a versioned content fingerprint.
+const FingerprintV2Prefix = "v2:"
+
+// NewFingerprintV2 returns the content-specific identity for a finding.
+//
+// The file path and rule ID keep the identity scoped to the same kind of
+// finding. The secret and matched line content prevent a rotated secret from
+// matching an old ignore entry and distinguish nearby occurrences. The line
+// number itself is intentionally omitted; Fingerprint remains the coordinate
+// hint and is allowed to drift when code is inserted above a finding.
+func (f Finding) NewFingerprintV2() string {
+	return newFingerprintV2(f.File, f.RuleID, f.Secret, f.Match, strings.TrimSpace(f.Line))
+}
+
+// NewFingerprintV2 builds a versioned content identity from its scoping and
+// secret fields. Inputs are length-prefixed to avoid canonicalization
+// collisions between arbitrary secret values.
+func NewFingerprintV2(file, ruleID, secret string) string {
+	return newFingerprintV2(file, ruleID, secret, "", "")
+}
+
+func newFingerprintV2(file, ruleID, secret string, context ...string) string {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, "gitleaks-fingerprint-v2\n")
+	writeFingerprintField := func(value string) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = hash.Write(length[:])
+		_, _ = io.WriteString(hash, value)
+	}
+
+	writeFingerprintField(filepath.ToSlash(file))
+	writeFingerprintField(ruleID)
+	writeFingerprintField(secret)
+	for _, value := range context {
+		writeFingerprintField(value)
+	}
+
+	return FingerprintV2Prefix + hex.EncodeToString(hash.Sum(nil))
+}
+
+// IsValidFingerprintV2 reports whether token is a syntactically valid V2
+// fingerprint.
+func IsValidFingerprintV2(token string) bool {
+	if !strings.HasPrefix(token, FingerprintV2Prefix) {
+		return false
+	}
+
+	digest := strings.TrimPrefix(token, FingerprintV2Prefix)
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 type RequiredFinding struct {
@@ -76,6 +146,10 @@ func (f *Finding) AddRequiredFindings(afs []*RequiredFinding) {
 
 // Redact removes sensitive information from a finding.
 func (f *Finding) Redact(percent uint) {
+	if f.FingerprintV2 == "" {
+		f.FingerprintV2 = f.NewFingerprintV2()
+	}
+
 	secret := maskSecret(f.Secret, percent)
 	if percent >= 100 {
 		secret = "REDACTED"
